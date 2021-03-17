@@ -1,0 +1,51 @@
+Aggregation Service - Operation instructions
+--------------------------------------------
+This is a Java project using Gradle for dependency and build management.
+It can be run from an IDE or CLI using the gradle:bootRun interface
+
+There are two System Properties that can be used to configure the Aggregation Service's behaviour as follows:
+ - server.port
+ 	 - The TCP port Netty will accept incoming requests on; default is 8081, e.g. http://localhost:8081/aggregation?...
+ - client.url
+ 	 - The base URL for addressing the Services being aggregated.  Defaults to http://localhost:8090, e.g. http://localhost:8090/shipments?....
+       (assumes that all component Services have the same base URL)
+These can be overridden using -Dserver.port=XXX etc as normal - I have plumbed these inside build.gradle so they reach the application, e.g:
+ > ./gradlew bootRun -Dserver.port=8069
+
+
+Aggregation Service - design/implementation notes
+-------------------------------------------------
+This Service is built using WebFlux, since its reactive programming paradigm seemed a good fit for the Service's intricate lifecycle requirements.
+
+The application is assembled using annotation-driven Spring Beans, and is split into two packages:
+	service.aggregation - the classes that spin up the microservice and manage incoming requests
+	client - the classes that manage component API calls and the knitting of their individual responses into the awaiting overarching response  
+
+At the API level, I have not been rigorous around validating/enforcing the API contract. For instance:
+ - I am allowing any of the three parameters representing the component call's q params to be missing or blank.
+ - I am ignoring spurious parameters
+ - I am not sanity-checking the parameter values at all;
+ 	I am merely treating them as pass-through data the the component APIs can reject with, say, a 400 error as appropriate,
+ 	which will translate into a null value in the aggregation response. 
+ 
+Within the application I have used a mixture of explicitly defining the 3 Services being aggregated vs parameterising.
+This comes down to pragmatism/expediency mostly; where it is cleaner/simpler to be explicit, I have been so.
+For instance, I considered that the RequestHandler would be more robust if explicitly looking for expected incoming parameters
+and passing them to explicitly-instantiated BufferedClient instances vs letting arbitrary parameters leak into the Service to try to drive further API calls with.
+In contrast, the BufferedClient and its encapsulated Client instance are each parameterised to be aware of their target resource but base no specific logic on its value.
+AggregationResponse is explicit so as to achieve the desired JSON response structure "out of the box". 
+
+In terms of how I managed the request queueing, I opted for a logic breakdown as follows:
+ - Client.java knows how to make an API call to a component Service and invoke a ResponseHandler callback via #call().
+ - QueueBackedClient.java queues incoming requests until the conditions for making an API call are met by hitting the desired threshold or latency limit (the latter managed via a Timer).
+ 	Also implements the callback interface used to process responses, so they may be merged into pending aggregation responses so they can be sent when completed.
+ 	Note that I do not grow the queue if a given ID is already queued, instead knitting the new AggregationResponse into that same queue position.  
+ 	Since this class uses various fields to track state and it interacts with its Client asynchonrously, its key methods are internally atomic via synchronized(this).    
+ - RequestQueue.java manages the FIFO request queue and additionally maps each requested resource ID ("q" param value) to one or more response objects awaiting response data for that ID
+ - AggregationResponse is where knowledge of the scope of the aggregation call is managed, and it knows when it has all its data and is ready to be returned;
+	RequestHandler waits on this instance to be populated by a series of component API calls, and this instance signals the RequestHandler via notify() when complete.
+	Since it will have response data being pushed to it asynchronously, the set() and reset() methods are atomic internally.
+	
+Testing:
+ - Provided representative rather than exhaustive unit test coverage, and opted for pseudo-integration test vs spinning up the actual Spring Boot application
+ 	in a test context, for expediency and to complement the full integration test harness that this implementation will be run against.	 
